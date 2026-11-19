@@ -1,0 +1,426 @@
+{
+  "uid": "gha-live",
+  "title": "Release pipelines \u2014 live",
+  "tags": [
+    "gha-tracer"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "type_live",
+        "label": "Type",
+        "type": "custom",
+        "query": "release,hotfix-merge,hotfix-tag",
+        "includeAll": true,
+        "allValue": "",
+        "multi": false,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "tracer",
+        "type": "constant",
+        "hide": 2,
+        "query": "http://gha-tracer:9090",
+        "current": {
+          "text": "http://gha-tracer:9090",
+          "value": "http://gha-tracer:9090"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "In progress (all release lines)",
+      "description": "",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "infinity"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "infinity"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "$tracer/api/active?change_type=$type_live",
+          "url_options": {
+            "method": "GET"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "repo",
+              "text": "Repo",
+              "type": "string"
+            },
+            {
+              "selector": "workflow",
+              "text": "Workflow",
+              "type": "string"
+            },
+            {
+              "selector": "release_line",
+              "text": "Line",
+              "type": "string"
+            },
+            {
+              "selector": "version",
+              "text": "Version",
+              "type": "string"
+            },
+            {
+              "selector": "change_type",
+              "text": "Type",
+              "type": "string"
+            },
+            {
+              "selector": "status",
+              "text": "Status",
+              "type": "string"
+            },
+            {
+              "selector": "conclusion",
+              "text": "Conclusion",
+              "type": "string"
+            },
+            {
+              "selector": "duration_seconds",
+              "text": "Duration",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_completed",
+              "text": "Jobs done",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_total",
+              "text": "Jobs seen",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_failed",
+              "text": "Jobs failed",
+              "type": "number"
+            },
+            {
+              "selector": "running_jobs",
+              "text": "Running now",
+              "type": "string"
+            },
+            {
+              "selector": "head_sha",
+              "text": "SHA",
+              "type": "string"
+            },
+            {
+              "selector": "started_at",
+              "text": "Started",
+              "type": "timestamp"
+            },
+            {
+              "selector": "url",
+              "text": "URL",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "URL"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in GitHub",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Conclusion"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "success": {
+                        "color": "green"
+                      },
+                      "failure": {
+                        "color": "red"
+                      },
+                      "cancelled": {
+                        "color": "orange"
+                      },
+                      "timed_out": {
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "Completed since gha-tracer started (newest first)",
+      "description": "In-memory, capped at RECENT_RUNS. Use Release overview for history.",
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 12
+      },
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "infinity"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "infinity"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "$tracer/api/recent?change_type=$type_live",
+          "url_options": {
+            "method": "GET"
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "repo",
+              "text": "Repo",
+              "type": "string"
+            },
+            {
+              "selector": "workflow",
+              "text": "Workflow",
+              "type": "string"
+            },
+            {
+              "selector": "release_line",
+              "text": "Line",
+              "type": "string"
+            },
+            {
+              "selector": "version",
+              "text": "Version",
+              "type": "string"
+            },
+            {
+              "selector": "change_type",
+              "text": "Type",
+              "type": "string"
+            },
+            {
+              "selector": "status",
+              "text": "Status",
+              "type": "string"
+            },
+            {
+              "selector": "conclusion",
+              "text": "Conclusion",
+              "type": "string"
+            },
+            {
+              "selector": "duration_seconds",
+              "text": "Duration",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_completed",
+              "text": "Jobs done",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_total",
+              "text": "Jobs seen",
+              "type": "number"
+            },
+            {
+              "selector": "jobs_failed",
+              "text": "Jobs failed",
+              "type": "number"
+            },
+            {
+              "selector": "running_jobs",
+              "text": "Running now",
+              "type": "string"
+            },
+            {
+              "selector": "head_sha",
+              "text": "SHA",
+              "type": "string"
+            },
+            {
+              "selector": "started_at",
+              "text": "Started",
+              "type": "timestamp"
+            },
+            {
+              "selector": "url",
+              "text": "URL",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Duration"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "URL"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in GitHub",
+                    "url": "${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Conclusion"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "success": {
+                        "color": "green"
+                      },
+                      "failure": {
+                        "color": "red"
+                      },
+                      "cancelled": {
+                        "color": "orange"
+                      },
+                      "timed_out": {
+                        "color": "red"
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "links": [
+    {
+      "title": "CI Releases",
+      "type": "dashboards",
+      "tags": [
+        "gha-tracer"
+      ],
+      "asDropdown": true
+    }
+  ]
+}

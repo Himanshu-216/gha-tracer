@@ -1,0 +1,7 @@
+apiVersion: 1
+providers:
+  - name: gha-tracer
+    folder: CI Releases
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

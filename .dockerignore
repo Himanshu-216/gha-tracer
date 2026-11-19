@@ -1,0 +1,3 @@
+deploy/terraform/.terraform
+deploy/local/.env
+*.pem

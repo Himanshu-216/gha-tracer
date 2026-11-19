@@ -1,0 +1,26 @@
+{
+  "action": "completed",
+  "installation": { "id": 42 },
+  "repository": { "full_name": "acme/payments", "name": "payments", "owner": { "login": "acme" } },
+  "workflow_run": {
+    "id": 9001,
+    "name": "Release",
+    "head_branch": "v1.20.0",
+    "head_sha": "abc123def456",
+    "event": "push",
+    "status": "completed",
+    "conclusion": "failure",
+    "run_attempt": 1,
+    "run_number": 77,
+    "html_url": "https://github.com/acme/payments/actions/runs/9001",
+    "created_at": "2026-11-01T10:00:00Z",
+    "run_started_at": "2026-11-01T10:00:00Z",
+    "updated_at": "2026-11-01T10:30:00Z",
+    "repository": { "full_name": "acme/payments", "name": "payments", "owner": { "login": "acme" } },
+    "triggering_actor": { "login": "release-bot" },
+    "actor": { "login": "release-bot" },
+    "referenced_workflows": [
+      { "path": "acme/shared-workflows/.github/workflows/deploy.yml@refs/heads/main", "sha": "fff000", "ref": "refs/heads/main" }
+    ]
+  }
+}

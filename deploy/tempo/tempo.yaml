@@ -1,0 +1,39 @@
+# Tempo single-binary for ECS Fargate, S3 backend. Env vars are expanded
+# (-config.expand-env=true): TEMPO_S3_BUCKET, AWS_REGION, TEMPO_RETENTION.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  max_block_duration: 5m        # small blocks: less lost if the task dies hard
+  flush_all_on_shutdown: true   # ECS stopTimeout gives it time to flush on SIGTERM
+
+compactor:
+  compaction:
+    block_retention: ${TEMPO_RETENTION:-2160h}   # 90 days
+
+query_frontend:
+  search:
+    max_duration: 0   # allow searching the whole retention (release lines span weeks)
+
+storage:
+  trace:
+    backend: s3
+    s3:
+      bucket: ${TEMPO_S3_BUCKET}
+      endpoint: s3.${AWS_REGION}.amazonaws.com
+      region: ${AWS_REGION}
+      # credentials come from the ECS task role
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks

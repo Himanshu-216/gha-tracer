@@ -1,0 +1,39 @@
+{
+  "action": "in_progress",
+  "installation": {
+    "id": 42
+  },
+  "repository": {
+    "full_name": "acme/payments",
+    "name": "payments",
+    "owner": {
+      "login": "acme"
+    }
+  },
+  "workflow_job": {
+    "id": 503,
+    "run_id": 9001,
+    "run_attempt": 1,
+    "name": "deploy / apply",
+    "status": "in_progress",
+    "conclusion": null,
+    "created_at": "2026-11-01T10:10:05Z",
+    "started_at": "2026-11-01T10:12:00Z",
+    "completed_at": null,
+    "labels": [
+      "self-hosted",
+      "deploy"
+    ],
+    "runner_name": "deploy-2",
+    "steps": [
+      {
+        "number": 1,
+        "name": "terraform apply",
+        "status": "completed",
+        "conclusion": "failure",
+        "started_at": "2026-11-01T10:12:00Z",
+        "completed_at": "2026-11-01T10:20:00Z"
+      }
+    ]
+  }
+}
