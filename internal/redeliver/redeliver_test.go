@@ -11,7 +11,6 @@ import (
 	gh "github.com/google/go-github/v88/github"
 
 	"github.com/Himanshu-216/gha-tracer/internal/github"
-	"github.com/Himanshu-216/gha-tracer/internal/tree"
 )
 
 type fakeAPI struct {
@@ -20,9 +19,6 @@ type fakeAPI struct {
 	redelivered []int64
 }
 
-func (f *fakeAPI) Jobs(context.Context, int64, string, int64, int) ([]tree.Job, error) {
-	return nil, nil
-}
 func (f *fakeAPI) Run(context.Context, int64, string, int64, int) (*gh.WorkflowRun, error) {
 	return nil, nil
 }
@@ -40,10 +36,11 @@ func TestSweep(t *testing.T) {
 	f := &fakeAPI{ds: []github.Delivery{
 		{ID: 1, GUID: "a", Event: "workflow_run", StatusCode: 503, DeliveredAt: now.Add(-3 * time.Minute)},
 		{ID: 2, GUID: "a", Event: "workflow_run", StatusCode: 0, DeliveredAt: now.Add(-2 * time.Minute)}, // latest failure for a
-		{ID: 3, GUID: "b", Event: "workflow_job", StatusCode: 502, DeliveredAt: now.Add(-2 * time.Minute)},
-		{ID: 4, GUID: "b", Event: "workflow_job", StatusCode: 202, DeliveredAt: now.Add(-1 * time.Minute)}, // b recovered
-		{ID: 5, GUID: "c", Event: "workflow_job", StatusCode: 202, DeliveredAt: now},
+		{ID: 3, GUID: "b", Event: "workflow_run", StatusCode: 502, DeliveredAt: now.Add(-2 * time.Minute)},
+		{ID: 4, GUID: "b", Event: "workflow_run", StatusCode: 202, DeliveredAt: now.Add(-1 * time.Minute)}, // b recovered
+		{ID: 5, GUID: "c", Event: "workflow_run", StatusCode: 202, DeliveredAt: now},
 		{ID: 6, GUID: "d", Event: "installation", StatusCode: 500, DeliveredAt: now}, // not ours
+		{ID: 7, GUID: "e", Event: "workflow_job", StatusCode: 500, DeliveredAt: now}, // no longer tracked
 	}}
 	results := map[string]int{}
 	s := New(f, time.Minute, time.Hour, func(r string) { results[r]++ }, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -8,35 +8,26 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Himanshu-216/gha-tracer/internal/release"
+	"github.com/Himanshu-216/gha-tracer/internal/tags"
 )
 
 type Config struct {
 	ListenAddr   string // public: /webhook, /healthz
-	InternalAddr string // private: /metrics, /api/*
+	InternalAddr string // private: /metrics, /healthz
 
 	AppID         int64
 	PrivateKey    []byte
 	WebhookSecret []byte
 	GitHubAPIURL  string // override for GHES / tests; empty = api.github.com
 
-	OTLPEndpoint string            // e.g. http://tempo:4318/v1/traces
-	OTLPHeaders  map[string]string // e.g. Authorization for hosted backends
+	TagPattern string
+	RunEvents  []string // workflow_run.event values to track (default: push)
 
-	TagPattern   string
-	BranchPrefix string
-	TraceAll     bool     // trace every run, not just release refs
-	TraceEvents  []string // run events to trace (default: push)
-
-	Workers   int
-	QueueSize int
-
-	StaleAfter        time.Duration // in-progress longer than this → stale gauge
-	RepollAfter       time.Duration // no events for this long → poll the API
+	KeepCompleted     time.Duration // finished runs stay exported this long
+	RepollAfter       time.Duration // running run with no events for this long → ask the API
 	RepollInterval    time.Duration
 	RedeliverInterval time.Duration
 	RedeliverLookback time.Duration // first sweep after start looks back this far
-	RecentRuns        int           // completed runs kept for /api/recent
 }
 
 func Load() (*Config, error) {
@@ -44,11 +35,8 @@ func Load() (*Config, error) {
 		ListenAddr:   env("LISTEN_ADDR", ":8080"),
 		InternalAddr: env("INTERNAL_ADDR", ":9090"),
 		GitHubAPIURL: os.Getenv("GITHUB_API_URL"),
-		OTLPEndpoint: env("OTLP_ENDPOINT", "http://localhost:4318/v1/traces"),
-		TagPattern:   env("TAG_PATTERN", release.DefaultTagPattern),
-		BranchPrefix: env("RELEASE_BRANCH_PREFIX", release.DefaultBranchPrefix),
-		TraceEvents:  list(env("TRACE_EVENTS", "push")),
-		OTLPHeaders:  map[string]string{},
+		TagPattern:   env("TAG_PATTERN", tags.DefaultPattern),
+		RunEvents:    list(env("RUN_EVENTS", "push")),
 	}
 	var errs []string
 	fail := func(err error) {
@@ -77,30 +65,12 @@ func Load() (*Config, error) {
 		fail(fmt.Errorf("GITHUB_WEBHOOK_SECRET is required"))
 	}
 
-	for _, kv := range list(os.Getenv("OTLP_HEADERS")) {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			fail(fmt.Errorf("OTLP_HEADERS: %q is not key=value", kv))
-			continue
-		}
-		c.OTLPHeaders[strings.TrimSpace(k)] = strings.TrimSpace(v)
-	}
-
-	c.TraceAll, err = strconv.ParseBool(env("TRACE_ALL_RUNS", "false"))
-	fail(err)
-	c.Workers, err = strconv.Atoi(env("WORKERS", "4"))
-	fail(err)
-	c.QueueSize, err = strconv.Atoi(env("QUEUE_SIZE", "1000"))
-	fail(err)
-	c.RecentRuns, err = strconv.Atoi(env("RECENT_RUNS", "1000"))
-	fail(err)
-
 	durs := []struct {
 		dst  *time.Duration
 		name string
 		def  string
 	}{
-		{&c.StaleAfter, "STALE_AFTER", "2h"},
+		{&c.KeepCompleted, "KEEP_COMPLETED", "1h"},
 		{&c.RepollAfter, "REPOLL_AFTER", "20m"},
 		{&c.RepollInterval, "REPOLL_INTERVAL", "10m"},
 		{&c.RedeliverInterval, "REDELIVER_INTERVAL", "5m"},
@@ -112,12 +82,15 @@ func Load() (*Config, error) {
 			fail(fmt.Errorf("%s: %w", d.name, err))
 		}
 	}
+	if c.KeepCompleted < 5*time.Minute {
+		fail(fmt.Errorf("KEEP_COMPLETED must be at least 5m so Prometheus scrapes the final status"))
+	}
 
-	if _, err := release.New(c.TagPattern, c.BranchPrefix); err != nil {
+	if _, err := tags.New(c.TagPattern); err != nil {
 		fail(err)
 	}
-	if c.Workers < 1 || c.QueueSize < 1 {
-		fail(fmt.Errorf("WORKERS and QUEUE_SIZE must be >= 1"))
+	if len(c.RunEvents) == 0 {
+		fail(fmt.Errorf("RUN_EVENTS must not be empty"))
 	}
 
 	if len(errs) > 0 {

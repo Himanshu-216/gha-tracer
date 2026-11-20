@@ -1,64 +1,50 @@
 # gha-tracer
 
-Turns GitHub Actions **release pipelines** across all repos into traces, metrics and a live view.
+Shows whether the GitHub Actions workflows triggered by a **tag push** (`v1.20.0`, `v1.20.1`, …) succeeded, for every repo in the org, on one Grafana dashboard.
 
-- **Monthly release.** Pushing tag `v1.20.0` in each repo produces one trace per repo run, grouped under release line `v1.20`.
-- **Hotfix.** A merge into `release/v1.20.0` is recorded as `hotfix-merge`. The patch tag `v1.20.1` is recorded as `hotfix-tag`. Both have the same `head_sha`, so they pair up.
-- **Tree shape.** Each trace follows the run: run → reusable-workflow call (`workflow_call`) → job → step.
-- **What it needs.** It is one small stateless Go service. Finished trees go to Tempo (S3), metrics go to Prometheus, and dashboards and alerts live in Grafana. There's no database, and no workflow YAML changes are required.
+- **One row per run.** Pick a time range (e.g. last 6 hours) to see every tag-triggered run in it: repo, workflow, tag, status, duration and a link to the run.
+- **Child workflows are covered.** Reusable workflows (`uses: ./.github/workflows/x.yml`) run inside the caller's run, so a failing child fails the run and shows as **Failed**.
+- **What it needs.** One small stateless Go service and Prometheus as the only store. No database, no tracing backend, no workflow YAML changes.
 
 ```
-GitHub App webhooks ─► ALB /webhook ─► gha-tracer ─► OTLP/HTTP ─► Tempo (S3) ─┐
-  (workflow_run,                         │  └─ /metrics ─► Prometheus ─────────┼─► Grafana + alerts
-   workflow_job)                         └──── /api/active ─► Infinity ────────┘
+GitHub App webhook (workflow_run) ─► ALB /webhook ─► gha-tracer ─► /metrics ─► Prometheus ─► Grafana
 ```
 
 ## How it works
 
-1. **Webhook.** The service verifies `X-Hub-Signature-256` and drops duplicate `X-GitHub-Delivery` IDs. It then queues the event and returns `202`. If the queue is full it returns `503`, so GitHub marks the delivery failed and it gets redelivered later.
-2. **Classify.** The service reads `head_branch` and decides what kind of run it is:
+1. **Webhook.** The service checks `X-Hub-Signature-256`, drops duplicate `X-GitHub-Delivery` IDs and decodes `workflow_run` events. Other event types are ignored.
+2. **Filter.** A run is tracked only when `event` is `push` (`RUN_EVENTS`) and `head_branch` matches `TAG_PATTERN`. For tag pushes, GitHub puts the tag name in `head_branch`.
+3. **State.** `requested` and `in_progress` events mark the run as **Running**. `completed` sets its conclusion. A re-run keeps the same `run_id`, so its latest attempt replaces the earlier result. Out-of-order events can't move a run backwards.
+4. **Metrics.** Each run is exported as four gauges labelled `repo, workflow, tag, run_id`:
 
-   | head_branch | release_line | version | change_type |
-   |---|---|---|---|
-   | `v1.20.0` | `v1.20` | `v1.20.0` | `release` |
-   | `release/v1.20.0` | `v1.20` | – | `hotfix-merge` |
-   | `v1.20.1` | `v1.20` | `v1.20.1` | `hotfix-tag` |
-   | anything else | not traced (unless `TRACE_ALL_RUNS=true`) | | |
+   | Metric | Value |
+   |---|---|
+   | `gha_tag_run_status` | 0 running · 1 success · 2 failure · 3 cancelled · 4 timed out · 5 other |
+   | `gha_tag_run_started_seconds` | when the run (latest attempt) started |
+   | `gha_tag_run_duration_seconds` | elapsed time while running, final duration when done |
+   | `gha_tag_run_updated_seconds` | when this process last saw the run change (picks the freshest copy across restarts) |
 
-   By default only `push` events are traced (`TRACE_EVENTS`).
-3. **Live view.** `requested`, `in_progress` and `workflow_job` events update an in-memory view, which `/api/active` serves.
-4. **On `workflow_run.completed`:**
-   1. The service fetches `GET /repos/{repo}/actions/runs/{id}/attempts/{n}/jobs` with an App installation token.
-   2. It builds the tree. Jobs named `"deploy / plan"` are grouped under a synthetic `deploy` span, because that is how GitHub names jobs from reusable workflows.
-   3. It exports the tree to OTLP and records the run and job metrics.
-5. **Recovery.** There's no database, so recovery relies on these:
-   - **Deterministic IDs.** Trace and span IDs are hashes of GitHub IDs, so re-exporting a run produces the same spans.
-   - **Redelivery sweeper.** Every 5 minutes, and 30 seconds after startup, it redelivers webhook deliveries that failed. That covers downtime and deploys. It looks back up to 6 hours after a restart.
-   - **Re-poll.** Runs that have had no events for 20 minutes are fetched from the API. This catches `completed` events that were lost.
-   - **Retries.** A failed export or API call is retried with backoff: 3 quick retries in the exporter, then up to 5 more attempts through the queue.
-6. **Re-runs.** Each attempt becomes its own trace and links back to the previous attempt.
+   A finished run stays exported for `KEEP_COMPLETED` (1h) and is then dropped from memory. Prometheus keeps its samples, so the dashboard can show any range within Prometheus retention.
+5. **Recovery.** There's no database, so two small loops cover lost webhooks:
+   - **Redelivery sweeper.** Every 5 minutes, and 30 seconds after startup, it asks GitHub to redeliver failed `workflow_run` deliveries (service down, deploys). After a restart it looks back up to 6 hours.
+   - **Re-poll.** A run that is still Running with no events for 20 minutes is fetched from the API, which catches `completed` events that were lost.
 
 ## Repository layout
 
 ```
 cmd/gha-tracer         service
-cmd/backfill           export past runs (or fixture files) as traces
-internal/release       ref → line/version/change_type
-internal/tree          run + jobs → span tree
-internal/ids           deterministic trace/span IDs
-internal/emit          OTLP/HTTP JSON exporter
+internal/tags          tag pattern matching
+internal/runs          in-memory run state + Prometheus gauges
+internal/tracker       webhook → run state, re-poll
 internal/webhook       HMAC verify, dedupe, decode
-internal/github        GitHub App client + adapters
-internal/processor     pipeline, retries, re-poll
-internal/live          in-memory live view + /api
-internal/metrics       Prometheus metrics
+internal/github        GitHub App client (get run, deliveries)
 internal/redeliver     failed-delivery sweeper
-deploy/tempo           Tempo image + config for ECS (S3)
+internal/metrics       registry + gha-tracer's own counters
 deploy/prometheus      alert rules + scrape snippet
-deploy/grafana         datasources, dashboards (generated by gen_dashboards.py)
-deploy/local           docker compose: tracer + Tempo + Prometheus + Grafana
+deploy/grafana         datasource, dashboard (generated by gen_dashboards.py)
+deploy/local           docker compose: tracer + Prometheus + Grafana
 deploy/scripts         replay-webhook.sh
-testdata               webhook + jobs fixtures
+testdata               webhook fixtures
 ```
 
 ## Configuration (env)
@@ -70,20 +56,12 @@ testdata               webhook + jobs fixtures
 | `GITHUB_WEBHOOK_SECRET` | – | required |
 | `GITHUB_API_URL` | api.github.com | for GHES |
 | `LISTEN_ADDR` | `:8080` | public: `POST /webhook`, `GET /healthz` |
-| `INTERNAL_ADDR` | `:9090` | VPC only: `/metrics`, `/api/active`, `/api/recent`, `/healthz` |
-| `OTLP_ENDPOINT` | `http://localhost:4318/v1/traces` | Tempo or OTel Collector |
-| `OTLP_HEADERS` | – | `k=v,k2=v2`, e.g. auth for hosted backends |
-| `TAG_PATTERN` | `^v(\d+)\.(\d+)\.(\d+)$` | needs 3 groups: major, minor, patch |
-| `RELEASE_BRANCH_PREFIX` | `release/` | |
-| `TRACE_EVENTS` | `push` | run events to trace |
-| `TRACE_ALL_RUNS` | `false` | trace every run, not just release refs |
-| `WORKERS` / `QUEUE_SIZE` | `4` / `1000` | |
-| `STALE_AFTER` | `2h` | after this long in progress, a run counts in `gha_run_stale_active` |
+| `INTERNAL_ADDR` | `:9090` | VPC only: `/metrics`, `/healthz` |
+| `TAG_PATTERN` | `^v\d+\.\d+\.\d+$` | which tags count |
+| `RUN_EVENTS` | `push` | `workflow_run.event` values to track |
+| `KEEP_COMPLETED` | `1h` | how long a finished run stays exported (min 5m) |
 | `REPOLL_AFTER` / `REPOLL_INTERVAL` | `20m` / `10m` | |
 | `REDELIVER_INTERVAL` / `REDELIVER_LOOKBACK` | `5m` / `6h` | |
-| `RECENT_RUNS` | `1000` | completed runs kept in memory for `/api/recent` |
-
-`/api/active` and `/api/recent` accept `?repo=`, `?release_line=` and `?change_type=`.
 
 ---
 
@@ -94,160 +72,62 @@ testdata               webhook + jobs fixtures
 Go to **Org settings → Developer settings → GitHub Apps → New GitHub App**.
 
 1. **Webhook URL:** `https://<your-domain>/webhook`. Set a **webhook secret** with `openssl rand -hex 32`.
-2. **Repository permissions:** Actions: **Read-only**. Metadata: **Read-only**. That is all it needs.
-3. **Subscribe to events:** **Workflow run** and **Workflow job**.
+2. **Repository permissions:** Actions: **Read-only**. Metadata: **Read-only**.
+3. **Subscribe to events:** **Workflow run** only.
 4. **Installation:** "Only on this account".
 5. After creating it, note the **App ID** and generate a **private key** (`.pem`).
 6. **Install** the App on the org, for all repos or only the ones that release.
 
-### 2. AWS resources (ECS Fargate)
+### 2. AWS (ECS Fargate)
 
-Create these resources. A Terraform module can replace this list later.
-
-**Network**
-- Use the existing VPC.
-- The tasks go in **private subnets** with NAT egress, because they call `api.github.com`.
-- The ALB goes in **public subnets**.
-
-**Security groups**
-
-| SG | Inbound | From |
-|---|---|---|
-| `alb` | 443 | GitHub hook CIDRs: `curl -s https://api.github.com/meta \| jq -r '.hooks[]'`. Refresh them occasionally, or use a WAF IP set. |
-| `gha-tracer` | 8080 | `alb` SG |
-| `gha-tracer` | 9090 | Prometheus and Grafana (their SG or CIDR) |
-| `tempo` | 4318 | `gha-tracer` SG |
-| `tempo` | 3200 | Grafana |
-
-**ALB**
-- HTTPS listener with an ACM certificate.
-- Default action: fixed `404`.
-- One rule: path `/webhook` goes to target group `gha-tracer` (port 8080, health check `GET /healthz`).
-- Nothing else is public.
-
-**Images and storage**
-- **ECR:** two repositories, `gha-tracer` and `gha-tracer-tempo`. Build and push them:
-  ```sh
-  docker build -t $ECR/gha-tracer:$TAG .
-  docker build -t $ECR/gha-tracer-tempo:$TAG deploy/tempo
-  docker push $ECR/gha-tracer:$TAG && docker push $ECR/gha-tracer-tempo:$TAG
-  ```
-- **S3:** one bucket for Tempo blocks. Block public access, use SSE-S3, and optionally add a lifecycle rule that expires objects after about 100 days as a backstop to Tempo retention.
-
-**Secrets and service discovery**
-- **Secrets Manager:** one secret, `gha-tracer/github-app`, holding JSON:
-  ```json
-  { "app_id": "123456", "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "webhook_secret": "..." }
-  ```
-- **Cloud Map:** a private DNS namespace, e.g. `gha-tracer.local`, with two services, `gha-tracer` and `tempo` (A records). That gives you `tempo.gha-tracer.local` and `gha-tracer.gha-tracer.local`.
-
-**IAM**
-- **Execution role** (shared): `AmazonECSTaskExecutionRolePolicy` plus `secretsmanager:GetSecretValue` on the secret.
-- **Tempo task role:** `s3:ListBucket` on the bucket, and `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on `bucket/*`.
-- **gha-tracer task role:** no AWS permissions needed.
-
-**CloudWatch Logs:** one log group, e.g. `/ecs/gha-tracer` (both containers log JSON or text to stdout).
-
-**ECS services**
-
-| | gha-tracer | tempo |
-|---|---|---|
-| CPU / memory | 256 / 512 | 512 / 1024 |
-| Desired count | 1 | 1 |
-| Deployment min/max % | 100 / 200 (overlap is harmless) | **0 / 100** (never run two Tempos on one bucket) |
-| `stopTimeout` | 30s | 120s (time to flush the WAL) |
-| Ports | 8080, 9090 | 3200, 4318 |
-| Load balancer | target group on 8080 | – |
-| Cloud Map | `gha-tracer` | `tempo` |
-
-**Container environment**
-- **gha-tracer:**
-  - `OTLP_ENDPOINT=http://tempo.gha-tracer.local:4318/v1/traces`
-  - secrets: `GITHUB_APP_ID` ← `<secret-arn>:app_id::`, `GITHUB_APP_PRIVATE_KEY` ← `<secret-arn>:private_key::`, `GITHUB_WEBHOOK_SECRET` ← `<secret-arn>:webhook_secret::`
-- **tempo:**
-  - `TEMPO_S3_BUCKET=<bucket>`
-  - `AWS_REGION=<region>`
-  - optional `TEMPO_RETENTION=2160h`
-
-Tempo keeps its WAL on the task's ephemeral storage. A crash (not a normal stop) can lose up to about 5 minutes of unflushed traces. Re-export them with `backfill` if needed, or mount EFS at `/var/tempo` if that matters to you.
+- **Network:** the task goes in **private subnets** with NAT egress (it calls `api.github.com`). The ALB goes in **public subnets**.
+- **Security groups:** the ALB accepts 443 from the GitHub hook CIDRs (`curl -s https://api.github.com/meta | jq -r '.hooks[]'`; refresh them occasionally, or use a WAF IP set). The task accepts 8080 from the ALB and 9090 from Prometheus.
+- **ALB:** HTTPS listener with an ACM certificate. The default action is a fixed `404`, and one rule sends path `/webhook` to target group `gha-tracer` (port 8080, health check `GET /healthz`).
+- **ECR:** one repository: `docker build -t $ECR/gha-tracer:$TAG . && docker push $ECR/gha-tracer:$TAG`.
+- **Secrets Manager:** `gha-tracer/github-app` holding `{ "app_id": "...", "private_key": "-----BEGIN RSA PRIVATE KEY-----\n...", "webhook_secret": "..." }`. Map the keys to `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET`.
+- **Cloud Map:** private DNS service `gha-tracer` (e.g. `gha-tracer.gha-tracer.local`) so Prometheus can find the task.
+- **ECS service:** 256 CPU / 512 MB, desired count 1, deployment 100/200 (a short overlap is harmless), `stopTimeout` 30s. The execution role needs `secretsmanager:GetSecretValue`; the task role needs no AWS permissions.
 
 ### 3. Prometheus
 
-- Add the scrape job from [deploy/prometheus/scrape.yml](deploy/prometheus/scrape.yml). It uses `dns_sd` on the Cloud Map name, port 9090.
-- Load the rules from [deploy/prometheus/alerts.yml](deploy/prometheus/alerts.yml), and route them in Alertmanager or Grafana alerting (e.g. to Slack).
-- In `GhaTracerNoWebhooks`, adjust the working-hours window (it's in UTC).
+- Add the scrape job from [deploy/prometheus/scrape.yml](deploy/prometheus/scrape.yml).
+- Load [deploy/prometheus/alerts.yml](deploy/prometheus/alerts.yml) (optional). `TagRunFailed` fires when a tag run fails or times out. `TagRunStuck` fires when one has been running for over 2 hours.
+- Prometheus retention is how far back the dashboard can look.
 
 ### 4. Grafana
 
-1. **Datasources:** see [deploy/grafana/provisioning/datasources/datasources.yaml](deploy/grafana/provisioning/datasources/datasources.yaml). Create them with uids **`tempo`**, **`prometheus`** and **`infinity`**; the dashboards reference these uids.
-   - The Infinity plugin is `yesoreyeram-infinity-datasource`.
-   - Add `http://gha-tracer.gha-tracer.local:9090` to its allowed hosts.
-2. **Dashboards:** import the three in [deploy/grafana/dashboards/](deploy/grafana/dashboards/) (or provision them from that folder). Then set the hidden `tracer` constant variable to `http://gha-tracer.gha-tracer.local:9090`. It defaults to the docker-compose name.
+1. **Datasource:** a Prometheus datasource with uid **`prometheus`** (see [datasources.yaml](deploy/grafana/provisioning/datasources/datasources.yaml)).
+2. **Dashboard:** import [deploy/grafana/dashboards/tag-runs.json](deploy/grafana/dashboards/tag-runs.json), or provision it from that folder. For GHES, set the hidden `github_url` constant so the run links point at your server.
 
-The three dashboards:
-- **Release overview.** Enter a line such as `v1.20`. It shows what's running now, the `.0` release runs across repos, the hotfix runs (merge and patch tag, paired by SHA), failed jobs and slow jobs. Click a trace ID to open the waterfall.
-- **Release pipelines — live.** In-progress and recently completed runs, refreshed every 30s.
-- **Release pipeline trends.** Duration p50/p95, release vs hotfix, failures, success rate, slowest jobs, runner queue time, and gha-tracer's own health.
+The dashboard has:
+- a time picker (default: last 6 hours) and `repo` / `status` filters;
+- four counts: tag runs, succeeded, failed or cancelled, running;
+- one table: Started · Repo · Workflow · Tag · Status · Duration · Run (link to GitHub).
 
-Useful TraceQL:
-```
-{ resource.gha.release_line = "v1.20" && span.gha.node_kind = "run" }
-{ resource.gha.version = "v1.20.1" }
-{ resource.gha.head_sha = "abc123" }                       # merge + tag runs of one hotfix
-{ resource.gha.release_line = "v1.20" && status = error && span.gha.node_kind = "job" }
-```
+A run is listed when it **started** inside the selected range.
 
 ### 5. Verify after deploy
 
 1. In the GitHub App's **Advanced → Recent deliveries**, the `ping` delivery should show `200`.
-2. Push a test tag in a sandbox repo (e.g. `v9999.1.0`). Check that:
-   - it shows up in *Live*;
-   - after completion, the trace appears in *Release overview* for line `v9999.1`.
-3. Merge a commit into `release/v9999.1.0`, then tag `v9999.1.1` on that commit. Both runs should appear under Hotfixes with the same SHA.
-4. Make a job fail. `HotfixRunFailed` or `ReleaseRunFailed` should fire.
-5. Stop the gha-tracer task, push a tag, then start the task again. Within about 5 minutes the sweeper should redeliver and the trace should appear (check `gha_redeliveries_total{result="requested"}`).
-
-## Backfill past releases
-
-This uses the same `GITHUB_APP_*` env and `OTLP_ENDPOINT`. Re-running it is safe.
-```sh
-go run ./cmd/backfill -repo acme/payments -branch v1.20.0               # all completed runs for that tag
-go run ./cmd/backfill -repo acme/payments -branch release/v1.20.0 -limit 20
-go run ./cmd/backfill -repo acme/payments -run 9001                     # all attempts of one run
-go run ./cmd/backfill -run-file testdata/workflow_run_completed.json \
-                      -jobs-file testdata/jobs_9001_1.json -dry-run     # offline, prints OTLP JSON
-```
-Tempo search covers the whole retention period (`query_frontend.search.max_duration: 0`). Very old timestamps are fine.
+2. Push a test tag in a sandbox repo (e.g. `v9999.1.0`). It should appear as **Running**, then **Success** or **Failed** when it finishes.
+3. Stop the gha-tracer task, push a tag, then start the task again. Within about 5 minutes the sweeper should redeliver the missed events (`gha_redeliveries_total{result="requested"}`).
 
 ## Local development
 
 ```sh
 go test -race ./...
+python3 deploy/grafana/gen_dashboards.py               # after editing the dashboard
 cd deploy/local && cp .env.example .env && cp ~/Downloads/your-app.pem app.pem
-docker compose up --build                              # Grafana on :3000, Tempo on :3200
-gh webhook forward --org=<org> --events=workflow_run,workflow_job \
+docker compose up --build                              # Grafana on :3000
+gh webhook forward --org=<org> --events=workflow_run \
   --url=http://localhost:8080/webhook --secret="$GITHUB_WEBHOOK_SECRET"
-# or replay fixtures / push fixture traces straight to Tempo:
+# or replay a fixture:
 GITHUB_WEBHOOK_SECRET=... deploy/scripts/replay-webhook.sh workflow_run testdata/workflow_run_requested.json
-OTLP_ENDPOINT=http://localhost:4318/v1/traces go run ./cmd/backfill \
-  -run-file testdata/workflow_run_completed.json -jobs-file testdata/jobs_9001_1.json
 ```
-Fixtures replayed through the service still need a GitHub App, because the jobs are fetched from the API on completion. To see traces with no App at all, use `backfill -run-file`.
-
-## Alert runbook
-
-| Alert | Meaning / action |
-|---|---|
-| `ReleaseRunFailed`, `HotfixRunFailed` | A release or hotfix run failed. Open *Release overview* and look at *Failed jobs*. |
-| `ReleaseRunStuck` | A run has been in progress longer than `STALE_AFTER`. It may be waiting on approval or a runner. Check the run URL. |
-| `ReleaseJobQueueSlow` | Runner capacity problem for that label. |
-| `GhaTracerExportFailing` | Tempo is unreachable. Runs are retried for about 8 minutes, then picked up again by re-poll. Check the tempo task. |
-| `GhaTracerRedeliveryGaveUp` | A delivery failed 3 redeliveries. Find the run in the logs and `backfill -run <id>`. |
-| `GhaTracerNoWebhooks` | Check App → Recent deliveries, the ALB SG/WAF (GitHub CIDRs change) and certificate expiry. |
 
 ## Limits and trade-offs
 
-- **History:** history lasts as long as Tempo retention (default 90d). Long-term trends come from Prometheus. There are no SQL reports.
-- **Live view:** the live view is in memory, so it starts empty after a restart and refills from new events. Traces aren't affected.
-- **Tags vs branches:** in `workflow_run`, `head_branch` holds the tag name for tag pushes. A branch named exactly like a tag (e.g. `v1.20.0`) would be classified as a tag.
-- **Cross-run children:** children must be reusable workflows (`workflow_call`). If you ever trigger a child as a separate run (`workflow_dispatch` or `workflow_run`), it becomes its own trace and needs a parent reference to be linked.
+- **Reusable workflows only.** A child started as a separate run (`on: workflow_run`, `workflow_dispatch`) finishes after its parent, so its failure doesn't show on the parent's row.
+- **Tags vs branches.** In `workflow_run`, `head_branch` holds the tag name for tag pushes. A branch named exactly like a tag (e.g. `v1.20.0`) would be counted too.
+- **Restarts.** State is in memory. Runs already finished are safe in Prometheus. A run that was in progress during a restart reappears with its next webhook (the `completed` event, or a redelivery if it was missed).
+- **Lost for good.** If GitHub never delivers the `completed` event and the service restarted in between, re-poll doesn't know about the run. It shows as Running until it ages out of the range.

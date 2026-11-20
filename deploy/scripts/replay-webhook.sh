@@ -2,7 +2,7 @@
 # Sends a fixture as a signed GitHub webhook to a running gha-tracer.
 #   GITHUB_WEBHOOK_SECRET=... deploy/scripts/replay-webhook.sh workflow_run testdata/workflow_run_completed.json [url]
 set -euo pipefail
-event=${1:?event type (workflow_run|workflow_job)}
+event=${1:?event type (workflow_run)}
 file=${2:?payload file}
 url=${3:-http://localhost:8080/webhook}
 : "${GITHUB_WEBHOOK_SECRET:?set GITHUB_WEBHOOK_SECRET}"

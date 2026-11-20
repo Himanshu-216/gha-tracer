@@ -1,6 +1,6 @@
 // Package redeliver periodically asks GitHub to redeliver App webhook
-// deliveries that failed (service down, deploy, queue full). Together with the
-// deterministic span IDs this replaces durable storage.
+// deliveries that failed (service down, deploy). With Prometheus holding the
+// history, this is what lets the service run without durable storage.
 package redeliver
 
 import (
@@ -55,7 +55,7 @@ func (s *Sweeper) Run(ctx context.Context) {
 	}
 }
 
-var tracked = map[string]bool{"workflow_run": true, "workflow_job": true}
+var tracked = map[string]bool{"workflow_run": true}
 
 // Sweep redelivers each failed delivery GUID at most maxAttempts times. A
 // GUID counts as delivered once any attempt (original or redelivery) got a 2xx.
