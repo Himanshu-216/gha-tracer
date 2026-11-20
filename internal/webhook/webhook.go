@@ -1,6 +1,6 @@
 // Package webhook receives GitHub App webhooks: verifies the HMAC signature,
-// drops duplicate deliveries, decodes workflow_run / workflow_job events and
-// hands them to a sink without blocking the HTTP response.
+// drops duplicate deliveries, decodes workflow_run events and hands them to a
+// sink.
 package webhook
 
 import (
@@ -14,8 +14,8 @@ import (
 
 type Event struct {
 	DeliveryID string
-	Type       string // "workflow_run" | "workflow_job"
-	Payload    any    // *gh.WorkflowRunEvent | *gh.WorkflowJobEvent
+	Type       string // "workflow_run"
+	Payload    any    // *gh.WorkflowRunEvent
 }
 
 // Sink accepts an event; false means the queue is full.
@@ -62,8 +62,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.onEvent(typ, "ignored")
 		w.WriteHeader(http.StatusOK)
 		return
-	case "workflow_run", "workflow_job":
-	default:
+	case "workflow_run":
+	default: // workflow_job and anything else the App may still be subscribed to
 		h.onEvent(typ, "ignored")
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -84,7 +84,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if !h.sink(Event{DeliveryID: id, Type: typ, Payload: ev}) {
 		// Non-2xx marks the delivery failed at GitHub; the redelivery sweeper
-		// will replay it once we've caught up.
+		// will replay it later.
 		h.onEvent(typ, "queue_full")
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return

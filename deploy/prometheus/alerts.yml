@@ -1,32 +1,23 @@
 groups:
-  - name: gha-release-pipelines
+  - name: gha-tag-runs
     rules:
-      - alert: ReleaseRunFailed
-        expr: sum by (repo, workflow, change_type) (increase(gha_run_failures_total{change_type="release"}[10m])) > 0
+      # Fires while gha-tracer still exports the finished run (KEEP_COMPLETED,
+      # default 1h), then resolves on its own.
+      - alert: TagRunFailed
+        expr: |
+          max by (repo, workflow, tag, run_id) (gha_tag_run_status) == 2
+            or max by (repo, workflow, tag, run_id) (gha_tag_run_status) == 4
         labels: { severity: critical }
         annotations:
-          summary: "Release run failed: {{ $labels.repo }} / {{ $labels.workflow }}"
-          description: "Open the Release overview dashboard for the current line to see the failing job."
+          summary: "Tag run failed: {{ $labels.repo }} {{ $labels.tag }} ({{ $labels.workflow }})"
+          description: "https://github.com/{{ $labels.repo }}/actions/runs/{{ $labels.run_id }}"
 
-      - alert: HotfixRunFailed
-        expr: sum by (repo, workflow, change_type) (increase(gha_run_failures_total{change_type=~"hotfix-.*"}[10m])) > 0
-        labels: { severity: critical }
-        annotations:
-          summary: "Hotfix {{ $labels.change_type }} run failed: {{ $labels.repo }} / {{ $labels.workflow }}"
-
-      - alert: ReleaseRunStuck
-        expr: max by (repo, change_type) (gha_run_stale_active) > 0
+      - alert: TagRunStuck
+        expr: max by (repo, workflow, tag, run_id) (gha_tag_run_status == 0 and gha_tag_run_duration_seconds > 7200)
         for: 5m
         labels: { severity: warning }
         annotations:
-          summary: "{{ $labels.change_type }} run in {{ $labels.repo }} has been running longer than STALE_AFTER"
-
-      - alert: ReleaseJobQueueSlow
-        expr: histogram_quantile(0.95, sum by (le, runner_label) (rate(gha_job_queue_seconds_bucket[30m]))) > 600
-        for: 15m
-        labels: { severity: warning }
-        annotations:
-          summary: "p95 runner queue time for {{ $labels.runner_label }} above 10m"
+          summary: "Tag run running for over 2h: {{ $labels.repo }} {{ $labels.tag }} ({{ $labels.workflow }})"
 
   - name: gha-tracer-health
     rules:
@@ -37,31 +28,8 @@ groups:
         annotations:
           summary: "gha-tracer is not being scraped"
 
-      - alert: GhaTracerExportFailing
-        expr: increase(gha_emit_errors_total[15m]) > 0
-        labels: { severity: warning }
-        annotations:
-          summary: "gha-tracer cannot export traces to Tempo (runs will be retried; check Tempo)"
-
-      - alert: GhaTracerProcessingErrors
-        expr: sum by (stage) (increase(gha_process_errors_total[15m])) > 5
-        labels: { severity: warning }
-        annotations:
-          summary: "gha-tracer {{ $labels.stage }} errors (GitHub API or Tempo trouble)"
-
       - alert: GhaTracerRedeliveryGaveUp
         expr: increase(gha_redeliveries_total{result="gave_up"}[30m]) > 0
         labels: { severity: warning }
         annotations:
-          summary: "A webhook delivery failed 3 redeliveries; backfill the affected run manually"
-
-      # Dead-man switch: no webhooks for 2h during working hours (UTC; adjust).
-      - alert: GhaTracerNoWebhooks
-        expr: |
-          (time() - gha_last_webhook_timestamp_seconds > 7200)
-            and (gha_last_webhook_timestamp_seconds > 0)
-            and on() (hour() >= 4 and hour() < 14)
-            and on() (day_of_week() > 0 and day_of_week() < 6)
-        labels: { severity: warning }
-        annotations:
-          summary: "No GitHub webhooks for 2h; check the GitHub App webhook status and the ALB"
+          summary: "A webhook delivery failed 3 redeliveries; that run may be missing or stuck on Running"

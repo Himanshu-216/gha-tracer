@@ -47,6 +47,7 @@ func TestHandler(t *testing.T) {
 		{"bad signature", "workflow_run", "1", "wrong", run, false, 401},
 		{"ping", "ping", "2", "k", []byte(`{}`), false, 200},
 		{"other event", "push", "3", "k", []byte(`{}`), false, 204},
+		{"workflow_job ignored", "workflow_job", "3b", "k", []byte(`{}`), false, 204},
 		{"queue full", "workflow_run", "4", "k", run, true, 503},
 		{"retry after full is accepted", "workflow_run", "4", "k", run, false, 202},
 		{"duplicate", "workflow_run", "4", "k", run, false, 200},

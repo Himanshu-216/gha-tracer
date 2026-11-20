@@ -1,22 +1,9 @@
-# URLs come from env so the same file works locally and on ECS.
+# URL comes from env so the same file works locally and on ECS.
+# The dashboard references the datasource by uid "prometheus".
 apiVersion: 1
 datasources:
-  - name: Tempo
-    uid: tempo
-    type: tempo
-    access: proxy
-    url: ${TEMPO_URL}
-    jsonData:
-      tracesToMetrics: {}
-      search: { hide: false }
-      nodeGraph: { enabled: true }
   - name: Prometheus
     uid: prometheus
     type: prometheus
     access: proxy
     url: ${PROMETHEUS_URL}
-  - name: gha-tracer API
-    uid: infinity
-    type: yesoreyeram-infinity-datasource
-    jsonData:
-      allowedHosts: ["${GHA_TRACER_URL}"]

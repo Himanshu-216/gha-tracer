@@ -1,5 +1,4 @@
 /gha-tracer
-/backfill
 *.pem
 .env
 deploy/terraform/.terraform/

@@ -1,7 +1,7 @@
-# Local stack: gha-tracer + Tempo + Prometheus + Grafana.
+# Local stack: gha-tracer + Prometheus + Grafana.
 #   cp .env.example .env   # fill in your GitHub App values
 #   docker compose up --build
-#   gh webhook forward --org=<org> --events=workflow_run,workflow_job \
+#   gh webhook forward --org=<org> --events=workflow_run \
 #      --url=http://localhost:8080/webhook --secret="$GITHUB_WEBHOOK_SECRET"
 # Grafana: http://localhost:3000 (anonymous admin).
 name: gha-tracer
@@ -10,20 +10,10 @@ services:
     build: { context: ../.., dockerfile: Dockerfile }
     env_file: .env
     environment:
-      OTLP_ENDPOINT: http://tempo:4318/v1/traces
       REDELIVER_INTERVAL: 1h   # forwarded hooks aren't App deliveries; keep sweeper quiet locally
     volumes:
       - ./app.pem:/run/secrets/app.pem:ro   # your GitHub App private key
     ports: ["8080:8080", "9090:9090"]
-    depends_on: [tempo]
-
-  tempo:
-    image: grafana/tempo:2.9.0
-    command: ["-config.file=/etc/tempo.yaml"]
-    volumes:
-      - ./tempo.yaml:/etc/tempo.yaml:ro
-      - tempo-data:/var/tempo
-    ports: ["3200:3200", "4318:4318"]
 
   prometheus:
     image: prom/prometheus:v3.7.0
@@ -37,15 +27,9 @@ services:
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
-      GF_INSTALL_PLUGINS: yesoreyeram-infinity-datasource
-      TEMPO_URL: http://tempo:3200
       PROMETHEUS_URL: http://prometheus:9090
-      GHA_TRACER_URL: http://gha-tracer:9090
     volumes:
       - ../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../grafana/dashboards:/var/lib/grafana/dashboards:ro
     ports: ["3000:3000"]
-    depends_on: [tempo, prometheus]
-
-volumes:
-  tempo-data:
+    depends_on: [prometheus]

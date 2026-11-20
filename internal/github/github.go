@@ -1,5 +1,5 @@
-// Package github wraps the GitHub App APIs the service needs and adapts
-// go-github types into tree types.
+// Package github wraps the few GitHub App APIs the service needs: fetching a
+// run (re-poll) and listing/redelivering failed webhook deliveries.
 package github
 
 import (
@@ -14,13 +14,10 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	gh "github.com/google/go-github/v88/github"
-
-	"github.com/Himanshu-216/gha-tracer/internal/tree"
 )
 
 // API is what the rest of the service depends on (faked in tests).
 type API interface {
-	Jobs(ctx context.Context, installationID int64, repo string, runID int64, attempt int) ([]tree.Job, error)
 	Run(ctx context.Context, installationID int64, repo string, runID int64, attempt int) (*gh.WorkflowRun, error)
 	Deliveries(ctx context.Context, since time.Time) ([]Delivery, error)
 	Redeliver(ctx context.Context, deliveryID int64) error
@@ -115,39 +112,6 @@ func (c *Client) record(endpoint string, err error) {
 		c.onCall(endpoint, "error")
 	} else {
 		c.onCall(endpoint, "ok")
-	}
-}
-
-func (c *Client) Jobs(ctx context.Context, installationID int64, repo string, runID int64, attempt int) ([]tree.Job, error) {
-	owner, name, err := splitRepo(repo)
-	if err != nil {
-		return nil, err
-	}
-	cl, err := c.inst(installationID)
-	if err != nil {
-		return nil, err
-	}
-	var out []tree.Job
-	opts := &gh.ListOptions{PerPage: 100}
-	for {
-		var jobs *gh.Jobs
-		var resp *gh.Response
-		err = withRateLimitRetry(ctx, func() error {
-			var e error
-			jobs, resp, e = cl.Actions.ListWorkflowJobsAttempt(ctx, owner, name, runID, int64(attempt), opts)
-			return e
-		})
-		c.record("list_jobs", err)
-		if err != nil {
-			return nil, fmt.Errorf("github: list jobs %s#%d#%d: %w", repo, runID, attempt, err)
-		}
-		for _, j := range jobs.Jobs {
-			out = append(out, JobFromAPI(j))
-		}
-		if resp.NextPage == 0 {
-			return out, nil
-		}
-		opts.Page = resp.NextPage
 	}
 }
 
@@ -251,116 +215,4 @@ func splitRepo(full string) (string, string, error) {
 		return "", "", fmt.Errorf("github: bad repo %q", full)
 	}
 	return o, r, nil
-}
-
-// RunFromAPI adapts a workflow run (webhook or REST) into a tree.Run.
-func RunFromAPI(r *gh.WorkflowRun) tree.Run {
-	var refs []string
-	for _, w := range r.ReferencedWorkflows {
-		p := w.GetPath()
-		if ref := w.GetRef(); ref != "" {
-			p += "@" + ref
-		} else if sha := w.GetSHA(); sha != "" {
-			p += "@" + sha
-		}
-		refs = append(refs, p)
-	}
-	actor := r.GetTriggeringActor().GetLogin()
-	if actor == "" {
-		actor = r.GetActor().GetLogin()
-	}
-	return tree.Run{
-		Repo:                r.GetRepository().GetFullName(),
-		ID:                  r.GetID(),
-		Attempt:             max(r.GetRunAttempt(), 1),
-		Workflow:            r.GetName(),
-		HeadBranch:          r.GetHeadBranch(),
-		HeadSHA:             r.GetHeadSHA(),
-		Event:               r.GetEvent(),
-		Conclusion:          r.GetConclusion(),
-		Actor:               actor,
-		HTMLURL:             r.GetHTMLURL(),
-		StartedAt:           firstTime(r.RunStartedAt, r.CreatedAt),
-		UpdatedAt:           r.GetUpdatedAt().Time,
-		ReferencedWorkflows: refs,
-	}
-}
-
-func JobFromAPI(j *gh.WorkflowJob) tree.Job {
-	out := tree.Job{
-		ID:          j.GetID(),
-		Name:        j.GetName(),
-		Conclusion:  j.GetConclusion(),
-		CreatedAt:   j.GetCreatedAt().Time,
-		StartedAt:   j.GetStartedAt().Time,
-		CompletedAt: j.GetCompletedAt().Time,
-		Labels:      j.Labels,
-		RunnerName:  j.GetRunnerName(),
-		HTMLURL:     j.GetHTMLURL(),
-	}
-	for _, s := range j.Steps {
-		out.Steps = append(out.Steps, tree.Step{
-			Number:      int(s.GetNumber()),
-			Name:        s.GetName(),
-			Conclusion:  s.GetConclusion(),
-			StartedAt:   s.GetStartedAt().Time,
-			CompletedAt: s.GetCompletedAt().Time,
-		})
-	}
-	return out
-}
-
-func firstTime(ts ...*gh.Timestamp) time.Time {
-	for _, t := range ts {
-		if t != nil && !t.IsZero() {
-			return t.Time
-		}
-	}
-	return time.Time{}
-}
-
-// InstallationForRepo looks up the App installation that covers a repo
-// (used by the backfill tool; webhooks carry the installation ID).
-func (c *Client) InstallationForRepo(ctx context.Context, repo string) (int64, error) {
-	owner, name, err := splitRepo(repo)
-	if err != nil {
-		return 0, err
-	}
-	inst, _, err := c.apps.Apps.GetRepositoryInstallation(ctx, owner, name)
-	c.record("get_installation", err)
-	if err != nil {
-		return 0, fmt.Errorf("github: installation for %s: %w", repo, err)
-	}
-	return inst.GetID(), nil
-}
-
-// CompletedRuns lists completed runs for a branch or tag name, newest first.
-func (c *Client) CompletedRuns(ctx context.Context, installationID int64, repo, branch string, limit int) ([]*gh.WorkflowRun, error) {
-	owner, name, err := splitRepo(repo)
-	if err != nil {
-		return nil, err
-	}
-	cl, err := c.inst(installationID)
-	if err != nil {
-		return nil, err
-	}
-	var out []*gh.WorkflowRun
-	opts := &gh.ListWorkflowRunsOptions{Branch: branch, Status: "completed", ListOptions: gh.ListOptions{PerPage: 100}}
-	for {
-		runs, resp, err := cl.Actions.ListRepositoryWorkflowRuns(ctx, owner, name, opts)
-		c.record("list_runs", err)
-		if err != nil {
-			return nil, fmt.Errorf("github: list runs %s@%s: %w", repo, branch, err)
-		}
-		for _, r := range runs.WorkflowRuns {
-			out = append(out, r)
-			if limit > 0 && len(out) >= limit {
-				return out, nil
-			}
-		}
-		if resp.NextPage == 0 {
-			return out, nil
-		}
-		opts.Page = resp.NextPage
-	}
 }
