@@ -3,7 +3,10 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -53,7 +56,9 @@ func Load() (*Config, error) {
 
 	c.PrivateKey = []byte(os.Getenv("GITHUB_APP_PRIVATE_KEY"))
 	if f := os.Getenv("GITHUB_APP_PRIVATE_KEY_FILE"); len(c.PrivateKey) == 0 && f != "" {
-		c.PrivateKey, err = os.ReadFile(f)
+		// The path comes from the operator's deployment config, not from
+		// request data, so reading an arbitrary path is intended here.
+		c.PrivateKey, err = os.ReadFile(filepath.Clean(f)) // #nosec G304 G703 -- operator-supplied path
 		fail(err)
 	}
 	if len(c.PrivateKey) == 0 {
@@ -61,8 +66,17 @@ func Load() (*Config, error) {
 	}
 
 	c.WebhookSecret = []byte(os.Getenv("GITHUB_WEBHOOK_SECRET"))
-	if len(c.WebhookSecret) == 0 {
+	switch {
+	case len(c.WebhookSecret) == 0:
 		fail(fmt.Errorf("GITHUB_WEBHOOK_SECRET is required"))
+	case len(c.WebhookSecret) < MinWebhookSecretLen:
+		// The secret is the only thing authenticating the public /webhook
+		// endpoint; a short one can be brute-forced offline from one delivery.
+		fail(fmt.Errorf("GITHUB_WEBHOOK_SECRET must be at least %d bytes (use `openssl rand -hex 32`)", MinWebhookSecretLen))
+	}
+
+	if err := checkAPIURL(c.GitHubAPIURL); err != nil {
+		fail(err)
 	}
 
 	durs := []struct {
@@ -97,6 +111,35 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: %s", strings.Join(errs, "; "))
 	}
 	return c, nil
+}
+
+// MinWebhookSecretLen is the shortest GITHUB_WEBHOOK_SECRET accepted.
+const MinWebhookSecretLen = 16
+
+// checkAPIURL makes sure the App's JWT and installation tokens are never sent
+// in clear text: GITHUB_API_URL must be https, except for a loopback host
+// (local testing).
+func checkAPIURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("GITHUB_API_URL: %w", err)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("GITHUB_API_URL: %q has no host", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if ip := net.ParseIP(host); host == "localhost" || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("GITHUB_API_URL: must use https (got %q)", raw)
 }
 
 func env(k, def string) string {

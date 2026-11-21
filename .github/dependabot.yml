@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      go-deps: { patterns: ["*"] }
+
+  - package-ecosystem: docker # base image digests in Dockerfile
+    directory: /
+    schedule: { interval: weekly }
+
+  - package-ecosystem: docker-compose
+    directory: /deploy/local
+    schedule: { interval: monthly }
+
+  - package-ecosystem: github-actions # keeps SHA pins current
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }

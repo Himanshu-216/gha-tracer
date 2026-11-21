@@ -1,3 +1,8 @@
+.git
+.github
 deploy/terraform/.terraform
 deploy/local/.env
+**/.env
 *.pem
+*.key
+/gha-tracer

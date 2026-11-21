@@ -28,8 +28,11 @@ import (
 	"github.com/Himanshu-216/gha-tracer/internal/webhook"
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
-	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("version", version)
 	if err := run(log); err != nil {
 		log.Error("fatal", "err", err)
 		os.Exit(1)
@@ -79,9 +82,21 @@ func run(log *slog.Logger) error {
 	internal.Handle("GET /metrics", m.Handler())
 	internal.Handle("GET /healthz", healthz)
 
+	// Timeouts and header limits bound how long and how much a slow or
+	// hostile client can hold a connection (slowloris, header floods).
 	servers := []*http.Server{
-		{Addr: cfg.ListenAddr, Handler: pub, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second},
-		{Addr: cfg.InternalAddr, Handler: internal, ReadHeaderTimeout: 10 * time.Second},
+		{
+			Addr: cfg.ListenAddr, Handler: secureHeaders(pub),
+			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+			MaxHeaderBytes: 64 << 10,
+		},
+		{
+			Addr: cfg.InternalAddr, Handler: secureHeaders(internal),
+			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
+			WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second,
+			MaxHeaderBytes: 64 << 10,
+		},
 	}
 	errc := make(chan error, len(servers))
 	for _, s := range servers {
@@ -106,4 +121,18 @@ func run(log *slog.Logger) error {
 		_ = s.Shutdown(shutCtx)
 	}
 	return nil
+}
+
+// secureHeaders sets defensive response headers. Nothing here is meant for a
+// browser, so forbid sniffing, framing and caching outright.
+func secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		h.Set("Cache-Control", "no-store")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
