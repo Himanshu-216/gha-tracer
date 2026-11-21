@@ -16,7 +16,7 @@ services:
     ports: ["127.0.0.1:8080:8080", "127.0.0.1:9090:9090"]   # localhost only
 
   prometheus:
-    image: prom/prometheus:v3.7.0
+    image: prom/prometheus:v3.16.0
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
